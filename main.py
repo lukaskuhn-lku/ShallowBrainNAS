@@ -10,6 +10,9 @@ import os
 import time
 import shutil
 import wandb
+import ray
+
+ray.init(num_cpus=4)
 
 State = namedtuple('State', ['layer_type', 'layer_depth', 'num_filters', 'kernel_size', 'fc_count'])
 Action = namedtuple('Action', ['layer_type', 'num_filters', 'kernel_size', 'skip_connection'])
@@ -322,7 +325,7 @@ class CNNArchitectureSampler:
         return CNNModel(architecture, skip_connections, self.input_shape)
 
     def evaluate_model(self, model):
-        fx = FeatureExtractor(model=model, device='mps')
+        fx = FeatureExtractor(model=model, device='cpu')
         
         # Generate a unique identifier
         unique_id = f"{os.getpid()}_{int(time.time() * 1000)}"
@@ -332,7 +335,6 @@ class CNNArchitectureSampler:
         last_layer_name = list(model.layers._modules.keys())[-1]
       
         last_layer = [f"layers.{last_layer_name}"]
-        print(f"Last layer name: {last_layer}")
 
         fx.extract(data_path=self.stimuli_path, save_path=save_path, consolidate_per_layer=False, layers_to_extract=last_layer)
         
@@ -354,7 +356,6 @@ class CNNArchitectureSampler:
         last_layer_df = results_dataframe[results_dataframe.Layer == last_layer[0]]
     
         mean = last_layer_df.R.mean()
-        print(f"Mean R value: {mean}")
 
         # remove the folder
         shutil.rmtree(save_path)
@@ -372,6 +373,7 @@ class CNNArchitectureSampler:
         new_q = current_q + self.alpha * (reward + self.gamma * next_max_q - current_q)
         self.q_table[state_idx, action_idx] = new_q
 
+    @ray.remote
     def sample_and_evaluate(self):
         architecture, skip_connections = self.sample_architecture()
         print(architecture)
@@ -383,7 +385,6 @@ class CNNArchitectureSampler:
             return architecture, skip_connections, reward, True
         
         model = self.architecture_to_torch_model(architecture, skip_connections)
-        print(model)
 
         rewards = []
         for _ in range(3):
@@ -408,13 +409,16 @@ class CNNArchitectureSampler:
         for episode in range(num_episodes):
             self.episode = episode
             
+            # Sample 100 architectures and evaluate them
+            futures = [self.sample_and_evaluate.remote(self) for _ in range(models_per_episode)]
+            results = ray.get(futures)
+
             architectures = []
             skip_connections_list = []
             rewards = []
             new_samples = 0
 
-            for _ in range(models_per_episode):
-                arch, skips, reward, is_cached = self.sample_and_evaluate()
+            for arch, skips, reward, is_cached  in results:
                 architectures.append(arch)
                 skip_connections_list.append(skips)
                 rewards.append(reward)
