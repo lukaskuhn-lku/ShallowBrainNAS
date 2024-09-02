@@ -322,7 +322,7 @@ class CNNArchitectureSampler:
                     skip_x = nn.functional.interpolate(skip_x, size=target_shape[2:])
                 return skip_x
 
-        return CNNModel(architecture, skip_connections, self.input_shape)
+        retu7rn CNNModel(architecture, skip_connections, self.input_shape)
 
     def evaluate_model(self, model):
         fx = FeatureExtractor(model=model, device='cpu')
