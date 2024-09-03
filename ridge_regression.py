@@ -6,7 +6,7 @@ import random
 import pandas as pd
 from sklearn.model_selection import train_test_split
 from sklearn.decomposition import IncrementalPCA
-from sklearn.linear_model import Ridge
+from sklearn.linear_model import Ridge, RidgeCV
 from scipy.stats import pearsonr, ttest_1samp, sem
 import warnings
 
@@ -202,6 +202,110 @@ def train_Ridgeregression_per_ROI(trn_x,tst_x,trn_y,tst_y,alpha):
     for v in range(y_prd.shape[1]):
         correlation_lst[v] = pearsonr(y_prd[:,v], tst_y[:,v])[0]
     return correlation_lst
+
+def train_RidgeCV_per_ROI(X, y, alpha, cv):
+    """
+    Train a RidgeCV regression model for each ROI and compute correlation coefficients.
+
+    Args:
+        X (numpy.ndarray): Encoded features.
+        y (numpy.ndarray): fMRI data.
+        alpha (float): Alpha value for ridge regression.
+        cv (int): Number of cross-validation folds.
+
+    Returns:
+        correlation_lst (numpy.ndarray): List of correlation coefficients for each ROI.
+    """
+    ridgecv = RidgeCV(alphas=[alpha], cv=cv)  # Use a single alpha value
+    ridgecv.fit(X, y)
+    y_pred = ridgecv.predict(X)
+    correlation_lst = np.array([pearsonr(y_pred[:, v], y[:, v])[0] for v in range(y.shape[1])])
+    return correlation_lst
+
+def RidgeCV_Encoding(feat_path, roi_path, model_name, alpha, trn_tst_split=0.8, n_folds=3, n_components=100, batch_size=100, just_corr=True, return_correlations=False, random_state=14, save_path="RidgeCV_Encoding_Results"):
+    """
+    Perform RidgeCV encoding analysis to relate model activations to fMRI data.
+
+    Args:
+        feat_path (str): Path to the directory containing model activation .npz files for multiple layers.
+        roi_path (str or list): Path to the directory containing .npy fMRI data files for multiple ROIs.
+        model_name (str): Name of the model being analyzed (used for labeling in the output).
+        alpha (float): Alpha value for ridge regression.
+        trn_tst_split (float): Proportion of data to use for training (rest is used for testing).
+        n_folds (int): Number of folds for cross-validation in RidgeCV.
+        n_components (int): Number of principal components to retain in PCA.
+        batch_size (int): Batch size for Incremental PCA.
+        just_corr (bool): If True, only correlation values are considered in analysis.
+        return_correlations (bool): If True, return correlation values for each ROI and layer.
+        random_state (int): Seed for random operations to ensure reproducibility.
+        save_path (str): Path to save the results.
+
+    Returns:
+        all_rois_df (pd.DataFrame): DataFrame summarizing the analysis results.
+        corr_dict (dict): Dictionary containing correlation values for each layer and ROI (only if return_correlations is True).
+    """
+    np.random.seed(random_state)
+    random.seed(random_state)
+
+    roi_paths = roi_path if isinstance(roi_path, list) else [roi_path]
+    
+    feat_files = glob.glob(feat_path + '/*.npz')
+    num_layers, layer_list, _ = get_layers_ncondns(feat_path)
+    
+    trn_Idx, tst_Idx = train_test_split(range(len(feat_files)), test_size=(1-trn_tst_split), train_size=trn_tst_split, random_state=random_state)
+    
+    all_results = []
+    corr_dict = {} if return_correlations else None
+    
+    for layer_id in layer_list:
+        X_train, X_test = encode_layer(layer_id, n_components, batch_size, trn_Idx, tst_Idx, feat_path)
+        
+        if return_correlations:
+            corr_dict[layer_id] = {}
+        
+        for roi_path in roi_paths:
+            roi_files = glob.glob(os.path.join(roi_path, '*.npy')) if os.path.isdir(roi_path) else [roi_path]
+            
+            for roi_file in roi_files:
+                roi_name = os.path.basename(roi_file)[:-4]
+                fmri_data = np.load(roi_file)
+                y_train, y_test = fmri_data[trn_Idx], fmri_data[tst_Idx]
+                
+                ridgecv = RidgeCV(alphas=[alpha], cv=n_folds)
+                ridgecv.fit(X_train, y_train)
+                y_pred = ridgecv.predict(X_test)
+                
+                correlations = np.array([pearsonr(y_pred[:, v], y_test[:, v])[0] for v in range(y_test.shape[1])])
+                r = np.mean(correlations)
+                
+                result = {
+                    "ROI": roi_name,
+                    "Layer": layer_id,
+                    "Model": model_name,
+                    "R": r,
+                    "%R2": r ** 2,
+                    "Significance": ttest_1samp(correlations, 0)[1],
+                    "SEM": sem(correlations),
+                    "Alpha": alpha,
+                    "LNC": np.nan,
+                    "UNC": np.nan
+                }
+                all_results.append(result)
+                
+                if return_correlations:
+                    corr_dict[layer_id][roi_name] = correlations
+
+    all_rois_df = pd.DataFrame(all_results)
+    
+    if not os.path.exists(save_path):
+        os.makedirs(save_path)
+    csv_file_path = f"{save_path}/{model_name}_RidgeCV.csv"
+    all_rois_df.to_csv(csv_file_path, index=False)
+    
+    if return_correlations:
+        return all_rois_df, corr_dict
+    
+    return all_rois_df
 
 
 def Ridge_Encoding(feat_path, roi_path, model_name, alpha, trn_tst_split=0.8, n_folds=3, n_components=100, batch_size=100, just_corr=True, return_correlations = False,random_state=14, save_path="Linear_Encoding_Results"):

@@ -5,14 +5,12 @@ import torch
 import torch.nn as nn
 from net2brain.utils.download_datasets import DatasetNSD_872
 from net2brain.feature_extraction import FeatureExtractor
-from net2brain.evaluations.ridge_regression import Ridge_Encoding
+from net2brain.evaluations.ridge_regression import Ridge_Encoding, RidgeCV_Encoding
 import os
 import time
 import shutil
 import wandb
 import ray
-
-ray.init(num_cpus=4)
 
 State = namedtuple('State', ['layer_type', 'layer_depth', 'num_filters', 'kernel_size', 'fc_count'])
 Action = namedtuple('Action', ['layer_type', 'num_filters', 'kernel_size', 'skip_connection'])
@@ -322,10 +320,10 @@ class CNNArchitectureSampler:
                     skip_x = nn.functional.interpolate(skip_x, size=target_shape[2:])
                 return skip_x
 
-        retu7rn CNNModel(architecture, skip_connections, self.input_shape)
+        return CNNModel(architecture, skip_connections, self.input_shape)
 
     def evaluate_model(self, model):
-        fx = FeatureExtractor(model=model, device='cpu')
+        fx = FeatureExtractor(model=model, device='mps')
         
         # Generate a unique identifier
         unique_id = f"{os.getpid()}_{int(time.time() * 1000)}"
@@ -340,15 +338,15 @@ class CNNArchitectureSampler:
         
 
         # TODO random state for reproducibility to 1,2,3
-        results_dataframe = Ridge_Encoding(
+        results_dataframe = RidgeCV_Encoding(
             save_path,
             self.roi_path,
             f"temp_model_{unique_id}",
             n_folds=3,
             trn_tst_split=0.8,
             n_components=100,
-            batch_size=100,
-            return_correlations=True,
+            batch_size=64,
+            return_correlations=False,
             save_path=f"tmp/results_{unique_id}",
             alpha=1.0,
         )
@@ -373,9 +371,7 @@ class CNNArchitectureSampler:
         new_q = current_q + self.alpha * (reward + self.gamma * next_max_q - current_q)
         self.q_table[state_idx, action_idx] = new_q
 
-    @ray.remote
-    def sample_and_evaluate(self):
-        architecture, skip_connections = self.sample_architecture()
+    def sample_and_evaluate(self, architecture, skip_connections):
         print(architecture)
 
         arch_key = (tuple(architecture), tuple(skip_connections))
@@ -408,17 +404,25 @@ class CNNArchitectureSampler:
     def train(self, num_episodes=10, models_per_episode=100):
         for episode in range(num_episodes):
             self.episode = episode
-            
-            # Sample 100 architectures and evaluate them
-            futures = [self.sample_and_evaluate.remote(self) for _ in range(models_per_episode)]
-            results = ray.get(futures)
 
+            archs = [self.sample_architecture() for _ in range(1000)]
+
+            unique_archs = []
+
+            for arch, skip in archs:
+                if (arch, skip) not in unique_archs:
+                    unique_archs.append((arch, skip))
+
+                if len(unique_archs) >= models_per_episode:
+                    break
+            
             architectures = []
             skip_connections_list = []
             rewards = []
             new_samples = 0
 
-            for arch, skips, reward, is_cached  in results:
+            for arch, skip in unique_archs:
+                arch, skips, reward, is_cached = self.sample_and_evaluate(arch, skip)
                 architectures.append(arch)
                 skip_connections_list.append(skips)
                 rewards.append(reward)
@@ -426,7 +430,7 @@ class CNNArchitectureSampler:
                     new_samples += 1
                     self.total_architectures_sampled += 1
 
-            self.run.log({"rewards": rewards})
+                self.run.log({"rewards": reward})
             
             for architecture, skip_connections, reward in zip(architectures, skip_connections_list, rewards):
                 if reward > self.best_reward:
